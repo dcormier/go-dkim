@@ -2,9 +2,14 @@ package dkim
 
 import (
 	//"fmt"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -33,6 +38,17 @@ kS5vLkzRI84eiJrm3+IieUqIIicsO+WYxQs+JgVx5XhpPjX4SQjHtwEC2xKkWnEv
 
 	selector = "test"
 )
+
+func privKeyRSA(tb testing.TB) *rsa.PrivateKey {
+	block, rest := pem.Decode([]byte(privKey))
+	require.NotNil(tb, block)
+	require.Empty(tb, rest)
+
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	require.NoError(tb, err)
+
+	return key
+}
 
 var emailBase = "Received: (qmail 28277 invoked from network); 1 May 2015 09:43:37 -0000" + CRLF +
 	"Received: (qmail 21323 invoked from network); 1 May 2015 09:48:39 -0000" + CRLF +
@@ -338,53 +354,69 @@ func Test_Sign(t *testing.T) {
 }
 
 func Test_Verify(t *testing.T) {
+	resolveTXT := DNSOptLookupTXT(func(name string) ([]string, error) {
+		switch name {
+		case selector + "._domainkey." + domain:
+			return []string{"v=DKIM1; t=y; p=" + pubKey}, nil
+		// case "TODO._domainkey.gmail.com":
+		// 	return []string{"v=DKIM1; p="}, nil
+		default:
+			return net.LookupTXT(name)
+		}
+	})
+
 	// no DKIM header
 	email := []byte(emailBase)
-	status, err := Verify(&email)
+	status, err := Verify(&email, resolveTXT)
 	assert.Equal(t, NOTSIGNED, status)
 	assert.Equal(t, ErrDkimHeaderNotFound, err)
 
 	// No From
 	email = []byte(signedNoFrom)
-	status, err = Verify(&email)
+	status, err = Verify(&email, resolveTXT)
 	assert.Equal(t, ErrVerifyBodyHash, err)
 	assert.Equal(t, TESTINGPERMFAIL, status) // cause we use dkheader of the "with from" email
 
 	// missing mandatory 'a' flag
 	email = []byte(signedMissingFlag)
-	status, err = Verify(&email)
+	status, err = Verify(&email, resolveTXT)
 	assert.Error(t, err)
 	assert.Equal(t, PERMFAIL, status)
 	assert.Equal(t, ErrDkimHeaderMissingRequiredTag, err)
 
 	// missing bad algo
 	email = []byte(signedBadAlgo)
-	status, err = Verify(&email)
+	status, err = Verify(&email, resolveTXT)
 	assert.Equal(t, PERMFAIL, status)
 	assert.Equal(t, ErrSignBadAlgo, err)
 
 	// bad a flag
 	email = []byte(signedBadAFlag)
-	status, err = Verify(&email)
+	status, err = Verify(&email, resolveTXT)
 	assert.Equal(t, PERMFAIL, status)
 	assert.Equal(t, ErrSignBadAlgo, err)
 
 	// relaxed
 	email = []byte(signedRelaxedRelaxedLength)
-	status, err = Verify(&email)
+	status, err = Verify(&email, resolveTXT)
 	assert.NoError(t, err)
 	assert.Equal(t, SUCCESS, status)
 
 	// simple
 	email = []byte(signedSimpleSimpleLength)
-	status, err = Verify(&email)
+	status, err = Verify(&email, resolveTXT)
 	assert.NoError(t, err)
 	assert.Equal(t, SUCCESS, status)
 
 	// gmail
-	email = []byte(fromGmail)
-	status, err = Verify(&email)
-	assert.NoError(t, err)
-	assert.Equal(t, SUCCESS, status)
+	// TODO:
+	// Google removed this DNS record some time ago. Someone will have to send an email they're
+	// OK with being publicly available, replace the value of the fromGmail var with that, then grab
+	// the DNS record indicated in the DKIM signature and update the resolveTXT function to return
+	// it when asked. Then this should work.
+	// email = []byte(fromGmail)
+	// status, err = Verify(&email, resolveTXT)
+	// assert.NoError(t, err)
+	// assert.Equal(t, SUCCESS, status)
 
 }
